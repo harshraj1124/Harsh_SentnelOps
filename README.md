@@ -1,239 +1,118 @@
-# SentnelOps Internship Assignment — Anomaly Detection
+# Anomaly Detector — SentnelOps Assignment
 
-## Quick Start
+This is my submission for the SentnelOps internship assignment. I built a hybrid anomaly detection system that flags infrastructure resources which look anomalous or inefficient, explains why, and suggests what to do about it.
+
+## Running it
 
 ```bash
 pip install -r requirements.txt
 python anomaly_detector.py
 ```
 
-Outputs results to console and writes `sample_outputs.json`.
+Prints a summary to the console and writes full JSON output to `sample_outputs.json`.
 
 ---
 
-## Approach: Hybrid (Rule-Based + Isolation Forest)
+## Approach
 
-### Why Hybrid?
+I considered three options before settling on the hybrid:
 
-I evaluated three approaches before deciding:
+**Pure rule-based:** Fast, transparent, easy to explain. Works well for obvious cases like a zombie instance or a CPU-pegged server. The problem is you have to think of every case yourself — anything you didn't define gets missed.
 
-| Approach | Pros | Cons | Fit for this task |
-|---|---|---|---|
-| **Rule-Based** | Transparent, fast, deterministic, easy to explain | Misses multi-dimensional outliers; threshold tuning is manual | Good for clear-cut cases |
-| **Isolation Forest (ML)** | Catches unusual metric combinations no single rule would flag; no labeled data needed | Less interpretable on its own; needs batch context | Good for statistical outliers |
-| **LLM-Based Reasoning** | Highest explanation quality; handles ambiguity well | Non-deterministic, slow, expensive, no offline guarantee | Better for report generation, not real-time detection |
+**Isolation Forest (ML):** Looks at all metrics together and flags things that don't fit the pattern of the group. Useful for catching weird combinations where no single number is alarming but together they're suspicious — like low CPU with very high network traffic. Harder to explain on its own.
 
-**The hybrid approach is the right choice here because:**
+**LLM-based:** Best explanation quality, but non-deterministic and can't run offline. I think it's better as a post-processing layer for generating readable summaries than as your actual detection logic.
 
-1. Infrastructure anomalies often fall into well-understood categories (zombie, over-provisioned, CPU spike) that rules handle perfectly with high confidence.
-2. Some anomalies are subtle — a moderate CPU + moderate memory + high network on an internet-facing resource may not breach any single threshold but is statistically unusual. ML catches these.
-3. The assignment specifically values *explainability*. Rules produce crisp human-readable reasons. ML adds a supporting statistical signal.
-4. It avoids over-engineering while still being more robust than rules alone.
+**What I went with:** Hybrid — rules for interpretability and known patterns, Isolation Forest for statistical coverage of the edge cases rules miss. Each output has a `reason` from the rule that fired, and the ML score acts as a corroborating signal that adjusts the confidence up or down.
+
+Confidence formula:
+```
+# rules fired
+confidence = 0.70 × max_rule_confidence + 0.30 × ml_score
+
+# only ML flagged it (no rule fired)
+confidence = 0.80 × ml_score
+
+# healthy
+confidence ≈ 0.05 – 0.12
+```
+
+I weighted rules at 70% because they're more interpretable and calibrated. The ML part is more of a supporting signal than a decision-maker.
 
 ---
 
-## Architecture
+## Anomaly types
 
-```
-Input JSON
-    │
-    ├──► Rule-Based Detector     ──► signals: [(type, confidence, reason), ...]
-    │        (per-resource)
-    │
-    ├──► Isolation Forest        ──► ml_score: [0–1] per resource
-    │        (batch context)          (higher = more anomalous)
-    │
-    └──► Security Analyzer       ──► security_note: str | null
-             (per-resource)
-                    │
-                    ▼
-             Hybrid Merger
-         ─────────────────────
-         Primary type   = highest-severity signal
-         Confidence     = 0.70 × rule_conf + 0.30 × ml_score
-         Reason         = sorted signals, most severe first
-                    │
-                    ▼
-             JSON Output
-```
-
----
-
-## How Each Component Works
-
-### Rule-Based Detector
-
-Five independent rule checks, each producing a typed signal with a pre-calibrated confidence:
-
-| Rule | Condition | Type | Confidence |
-|---|---|---|---|
-| Idle/Zombie | CPU avg ≤ 3% AND network ≤ 5% | `idle_zombie` | 0.90 |
-| Over-provisioned | CPU avg < 10% AND CPU p95 < 20% | `over_provisioned` | 0.82 |
-| CPU spike | CPU p95 ≥ 95% | `cpu_spike` | 0.92 |
-| High CPU | CPU avg ≥ 80% | `high_cpu` | 0.78 |
-| Memory pressure | Memory avg ≥ 85% | `memory_pressure` | 0.75 |
-| Network anomaly | Network ≥ 70% AND CPU < 30% | `network_anomaly` | 0.80 |
-
-Multiple signals can fire simultaneously (e.g. `cpu_spike` + `memory_pressure`).
-The primary anomaly type is the highest-severity signal.
-
-### Isolation Forest
-
-Isolation Forest works by randomly partitioning the feature space and counting how many splits it takes to isolate a data point. Anomalous points are isolated quickly (few splits); normal points require many. The raw score is a negative float — more negative means more anomalous.
-
-I normalize it to `[0, 1]` where `1 = most anomalous` and use it as a supporting signal. With `contamination=0.3`, the model expects roughly 30% of the batch to be anomalous.
-
-**Features used:** `cpu_avg`, `cpu_p95`, `memory_avg`, `network_pct`
-
-### Confidence Scoring
-
-```
-if rule signals fired:
-    confidence = 0.70 × max(rule_confidence) + 0.30 × ml_score
-
-elif ml_score > 0.65:
-    confidence = 0.80 × ml_score   # ML-only: lower weight
-
-else (healthy):
-    confidence = small value ≈ 0.05–0.12
-```
-
-The 70/30 split was chosen deliberately: rules are more interpretable and calibrated, so they dominate. ML acts as a corroborating signal that bumps confidence when it agrees — or as a lone detector when rules don't fire.
-
-### Security Analyzer
-
-Maps exposure flags to risk levels:
-
-| Condition | Risk Level |
+| Type | What it means |
 |---|---|
-| `internet_facing=true` + `identity_attached=true` | HIGH — SSRF / credential exposure via metadata API |
-| `internet_facing=true` only | MEDIUM — verify security groups |
-| Internet-facing + network > 50% + CPU < 30% | SUSPICIOUS — possible data exfiltration |
+| `idle_zombie` | CPU and network both near zero — paying for a resource doing nothing |
+| `over_provisioned` | Very low CPU/p95 consistently — instance is too large for the workload |
+| `cpu_spike` | CPU p95 ≥ 95% — critically overloaded at peak |
+| `high_cpu` | CPU avg sustained above 80% — under-provisioned |
+| `memory_pressure` | Memory above 85% — OOM risk |
+| `network_anomaly` | High network + low CPU — unusual combination, worth investigating |
+| `statistical_outlier` | ML flagged it but no individual rule fired |
+| `healthy` | Everything looks fine |
 
 ---
 
-## Anomaly Type Reference
+## Security detection
 
-| Type | What it means | Action |
-|---|---|---|
-| `idle_zombie` | CPU and network both near zero; instance consuming resources doing nothing | Terminate or review for decommission |
-| `over_provisioned` | Very low CPU/p95; paying for capacity that isn't used | Downsize instance type |
-| `cpu_spike` | CPU p95 at critical levels; system is overwhelmed at peak | Scale up or fix the workload |
-| `high_cpu` | Sustained high average CPU | Monitor; consider scaling |
-| `memory_pressure` | Memory critically high | Increase allocation or fix leak |
-| `network_anomaly` | High network + low CPU (unusual combination) | Audit traffic flows |
-| `statistical_outlier` | ML flags unusual metric combination; no single rule fired | Manual review |
-| `healthy` | All metrics within normal ranges | No action |
+I added a security module because the `internet_facing` and `identity_attached` fields are too important to ignore:
+
+- **internet-facing + identity attached = HIGH RISK.** If IMDSv2 isn't enforced, an SSRF vulnerability can pull IAM credentials through the metadata API. This is a well-known AWS attack vector.
+- **internet-facing only = MEDIUM RISK.** Not inherently dangerous but worth verifying inbound rules.
+- **internet-facing + high outbound network + low CPU = SUSPICIOUS.** Could be a legit data transfer job, but it's the pattern you'd see in an exfiltration scenario too.
 
 ---
 
-## Sample Outputs (7 Test Cases)
+## Test cases
 
-| Resource | Anomalous | Type | Confidence | Security |
-|---|---|---|---|---|
-| i-1 | ✓ | over_provisioned | 0.74 | HIGH RISK |
-| i-2 | ✓ | cpu_spike | 0.87 | — |
-| i-3 | ✗ | healthy | 0.10 | — |
-| i-4 | ✓ | idle_zombie | 0.90 | — |
-| i-5 | ✓ | cpu_spike + memory_pressure | 0.93 | HIGH RISK |
-| i-6 | ✓ | network_anomaly | 0.78 | MEDIUM + SUSPICIOUS |
-| i-7 | ✗ | healthy | 0.09 | — |
+I ran it on the 2 provided resources plus 5 I added to cover a range of scenarios:
 
-See `sample_outputs.json` for full JSON.
+| Resource | Scenario | Result | Confidence |
+|---|---|---|---|
+| i-1 | Low CPU, internet-facing + identity | over_provisioned | 0.74 |
+| i-2 | CPU p95 at 98% | cpu_spike | 0.87 |
+| i-3 | Balanced metrics | healthy | 0.10 |
+| i-4 | Everything near zero | idle_zombie | 0.90 |
+| i-5 | High CPU + memory + internet-facing + identity | cpu_spike | 0.93 |
+| i-6 | Low CPU but network at 78%, internet-facing | network_anomaly | 0.78 |
+| i-7 | Balanced metrics | healthy | 0.09 |
 
----
-
-## Handling Ambiguity
-
-Real infrastructure data is imperfect. Here is how the system handles each case:
-
-**Missing fields:** `resource.get("cpu_avg", 0)` — defaults to 0, so the system degrades gracefully rather than crashing. A missing metric reduces the accuracy of ML scoring but does not break the pipeline.
-
-**Borderline metrics (e.g. cpu_avg = 11%, just above the "low" threshold):** The ML score acts as a tiebreaker. A borderline rule non-trigger with a high ML score will still surface as a `statistical_outlier` with moderate confidence.
-
-**Small batches:** Isolation Forest needs a reference distribution to work meaningfully. With fewer than 5 resources, the ML scores should be treated as supplementary only. The rule-based signals are still reliable.
-
-**Conflicting signals:** When `over_provisioned` and `network_anomaly` both fire on the same resource, the severity ranking resolves the primary type (`network_anomaly` wins at severity 3 vs 1). The reason string includes all signals, most important first.
+Full output in `sample_outputs.json`.
 
 ---
 
-## Approach Comparison (Bonus)
+## Tradeoffs and known limitations
 
-### Rule-Based vs ML vs LLM
+**Isolation Forest needs batch context.** The ML scores compare each resource to its peers. If you send one resource at a time, there's no reference distribution and the score is meaningless. For single-resource analysis you'd fall back entirely on rules, which is fine but you lose the statistical signal.
+
+**Thresholds are hand-tuned.** I picked values that made sense given typical cloud workload behavior (e.g. a 95% p95 CPU is almost always a problem), but in production these should be learned from each resource type's historical baseline — not hardcoded.
+
+**Point-in-time data only.** A CPU spike that lasts 30 seconds is very different from one that's been sustained for 3 hours. Right now I can't distinguish between them because I'm working with snapshots, not time series.
+
+**Missing fields default to 0.** The pipeline won't crash, but silent defaults can cause false negatives — a missing `cpu_p95` means the spike rule never fires. Production code should track data quality explicitly.
+
+---
+
+## What I'd improve with more time
+
+**Time-series detection** — run the rules over rolling windows (e.g. 1h, 6h, 24h) so "sustained anomaly" is different from "brief spike." This is probably the most impactful change.
+
+**Per-resource baselines** — instead of fixed thresholds, compute each resource's own rolling average and flag deviations from *its own* history. A bursty service and a steady-state service look very different and shouldn't share the same thresholds.
+
+**Online ML** — replace batch Isolation Forest with something like `river`'s HalfSpaceTrees so you can do real-time detection without needing a full batch of peers to fit on.
+
+**LLM explanation layer** — keep the rule + ML logic as-is for detection, but pass the signals to an LLM to generate better natural-language explanations for non-technical stakeholders. Detection and explanation are two different jobs.
+
+---
+
+## Project structure
 
 ```
-                    Rule-Based    Isolation Forest    LLM (GPT/Claude)
-─────────────────────────────────────────────────────────────────────
-Interpretability        ★★★★★            ★★★               ★★★★
-Speed                   ★★★★★            ★★★★              ★★
-Cost                    Free             Free              API cost
-Needs labels            No               No                No
-Catches subtle outliers ★★               ★★★★★             ★★★★
-Deterministic           Yes              Yes (seed)        No
-Handles ambiguity       Poor             Moderate          Excellent
-Best for                Clear thresholds Statistical noise Explanation gen.
+anomaly_detector.py   main script, all logic
+README.md             this file
+requirements.txt      scikit-learn, numpy
+sample_outputs.json   outputs from the 7 test cases
 ```
-
-**My recommendation for production:**
-- Use rules for known anomaly types with clear thresholds (fast, auditable)
-- Use Isolation Forest for catching the long tail of unusual combinations
-- Use an LLM as a post-hoc explanation layer only (not in the detection path)
-
-This assignment's hybrid approach reflects that recommendation.
-
----
-
-## Tradeoffs
-
-**What I chose and why:**
-- Hybrid over pure ML: explainability matters more than marginal accuracy gains in ops contexts
-- Isolation Forest over supervised ML: no labeled anomaly data exists (realistic constraint)
-- Flat script over microservices: the problem is a script-level task; over-architecting would obscure the reasoning
-
-**Known limitations:**
-- Isolation Forest needs a meaningful batch size; single-resource analysis loses statistical context
-- Thresholds are hand-tuned; in production these should be learned from historical baselines
-- `contamination=0.3` is a guess; in practice you'd tune this against known anomaly rates
-- No time-series context: a CPU spike that lasts 5 minutes is different from one that lasts 3 hours — this system can't distinguish them from snapshot data
-
----
-
-## What I Would Improve With More Time
-
-1. **Time-series integration** — Run detection over rolling windows (e.g. 1h, 24h) rather than point-in-time snapshots. Most real anomalies are patterns, not instants.
-
-2. **Learned baselines** — Instead of fixed thresholds, compute per-resource moving averages and flag deviations from the resource's own history (z-score or MAD-based).
-
-3. **Severity scoring** — Add a composite severity score (not just anomaly type) that accounts for criticality of the resource (production vs dev) and blast radius.
-
-4. **LLM explanation layer** — Feed the rule signals and ML score into a small LLM call to generate better natural-language explanations for non-technical stakeholders.
-
-5. **Feedback loop** — Let operators mark detections as false positives; use that signal to adjust thresholds automatically over time.
-
-6. **Streaming support** — Replace batch Isolation Forest with an online variant (e.g. `river` library's `HalfSpaceTrees`) for real-time processing.
-
----
-
-## Project Structure
-
-```
-.
-├── anomaly_detector.py   # Main script — all logic, runnable
-├── README.md             # This file
-├── requirements.txt      # Dependencies (scikit-learn, numpy)
-└── sample_outputs.json   # Pre-computed outputs for 7 test cases
-```
-
----
-
-## Why This Approach Fits SentnelOps
-
-> "At SentnelOps, we build systems where AI doesn't just predict — it explains and helps decide what should happen next."
-
-This is exactly what the hybrid approach delivers:
-- The **rule engine** provides the *explanation* (clear, auditable, deterministic)
-- The **ML layer** provides the *prediction* (catches what rules miss)
-- The **security analyzer** provides the *decision context* (what to do next)
-- Every output includes a `suggested_action` — the system doesn't just flag, it recommends
-
-The architecture is also intentionally extensible: adding a new anomaly type means adding one rule block and one entry in `ACTION_MAP`.

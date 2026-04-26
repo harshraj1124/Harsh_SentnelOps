@@ -1,0 +1,65 @@
+[
+  {
+    "resource_id": "i-1",
+    "is_anomalous": true,
+    "anomaly_type": "over_provisioned",
+    "reason": "CPU avg 2% and p95 5% are consistently very low — resource is significantly over-provisioned relative to actual workload",
+    "suggested_action": "Downsize to a smaller instance type; review 7–30 day usage patterns to right-size",
+    "confidence": 0.74,
+    "security_note": "HIGH RISK: Internet-facing with IAM/identity attached — SSRF or metadata API abuse (e.g. IMDSv1) could expose cloud credentials"
+  },
+  {
+    "resource_id": "i-2",
+    "is_anomalous": true,
+    "anomaly_type": "cpu_spike",
+    "reason": "CPU p95 at 98% — instance is critically overloaded at peak; risk of latency spikes, request queuing, and OOM",
+    "suggested_action": "Scale up or distribute load; profile workload to identify CPU hotspots",
+    "confidence": 0.87,
+    "security_note": null
+  },
+  {
+    "resource_id": "i-3",
+    "is_anomalous": false,
+    "anomaly_type": "healthy",
+    "reason": "All metrics are within normal operating ranges for this resource group.",
+    "suggested_action": "No action required; continue standard monitoring",
+    "confidence": 0.1,
+    "security_note": null
+  },
+  {
+    "resource_id": "i-4",
+    "is_anomalous": true,
+    "anomaly_type": "idle_zombie",
+    "reason": "CPU avg 1% and network 1% are both near zero — instance appears completely idle or is a zombie process",
+    "suggested_action": "Terminate or schedule decommission review — instance is idle and incurring cost",
+    "confidence": 0.9,
+    "security_note": null
+  },
+  {
+    "resource_id": "i-5",
+    "is_anomalous": true,
+    "anomaly_type": "cpu_spike",
+    "reason": "CPU p95 at 96% — instance is critically overloaded at peak; risk of latency spikes, request queuing, and OOM. Memory avg 92% is critically high — risk of OOM kills, swap thrashing, or memory leak",
+    "suggested_action": "Scale up or distribute load; profile workload to identify CPU hotspots",
+    "confidence": 0.93,
+    "security_note": "HIGH RISK: Internet-facing with IAM/identity attached — SSRF or metadata API abuse (e.g. IMDSv1) could expose cloud credentials"
+  },
+  {
+    "resource_id": "i-6",
+    "is_anomalous": true,
+    "anomaly_type": "network_anomaly",
+    "reason": "Network utilization 78% is high while CPU is only 8% — disproportionate network activity may indicate data exfiltration, rogue process, or misconfigured service. CPU avg 8% and p95 12% are consistently very low — resource is significantly over-provisioned relative to actual workload",
+    "suggested_action": "Audit network flows immediately; check for unauthorized data transfer or misconfigured services",
+    "confidence": 0.78,
+    "security_note": "MEDIUM RISK: Internet-facing instance — verify security groups and restrict inbound rules to minimum required | SUSPICIOUS: High outbound network with low CPU on internet-facing resource — possible data exfiltration vector; recommend VPC flow log analysis"
+  },
+  {
+    "resource_id": "i-7",
+    "is_anomalous": false,
+    "anomaly_type": "healthy",
+    "reason": "All metrics are within normal operating ranges for this resource group.",
+    "suggested_action": "No action required; continue standard monitoring",
+    "confidence": 0.09,
+    "security_note": null
+  }
+]
